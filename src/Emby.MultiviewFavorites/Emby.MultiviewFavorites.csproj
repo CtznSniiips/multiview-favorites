@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Emby server plugin: syncs a user's favorited Live TV channels into a
+    Dispatcharr Multiview layout.
+
+    netstandard2.1 loads on Emby 4.8 (.NET 6) and Emby 4.9 (.NET 8).
+
+    The Emby SDK assemblies are referenced straight from an Emby install's
+    "system" folder (or the copies in ../../sdk). Override with:
+        dotnet build -c Release -p:EmbySdkDir=/opt/emby-server/system
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <RootNamespace>Emby.MultiviewFavorites</RootNamespace>
+    <AssemblyName>Emby.MultiviewFavorites</AssemblyName>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
+    <Version>1.1.0</Version>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <EmbySdkDir Condition="'$(EmbySdkDir)' == ''">$(MSBuildThisFileDirectory)../../sdk</EmbySdkDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="MediaBrowser.Common">
+      <HintPath>$(EmbySdkDir)/MediaBrowser.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="MediaBrowser.Controller">
+      <HintPath>$(EmbySdkDir)/MediaBrowser.Controller.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="MediaBrowser.Model">
+      <HintPath>$(EmbySdkDir)/MediaBrowser.Model.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Remove="Configuration\configPage.html" />
+    <None Remove="Configuration\configPage.js" />
+    <None Remove="thumb.png" />
+    <EmbeddedResource Include="Configuration\configPage.html" />
+    <EmbeddedResource Include="Configuration\configPage.js" />
+    <EmbeddedResource Include="thumb.png" />
+  </ItemGroup>
+
+</Project>

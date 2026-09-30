@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>Multiview Favorites</title>
+</head>
+<body>
+    <div id="multiviewFavoritesConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-controller="__plugin/multiviewfavoritesjs">
+        <div data-role="content">
+            <div class="content-primary">
+
+                <form class="mvfForm">
+
+                    <div class="verticalSection">
+                        <h2 class="sectionTitle">Multiview Favorites</h2>
+                        <p class="fieldDescription" style="margin-top:0;">
+                            Favorited Live TV channels for the selected Emby user are matched to Dispatcharr channels by
+                            <b>channel number</b>. The lowest-numbered matches (up to the stream limit) become the tiles of a
+                            Dispatcharr Multiview layout, which you watch in Emby like any other channel.
+                        </p>
+
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label>
+                                <input is="emby-checkbox" type="checkbox" id="mvfEnabled" />
+                                <span>Enable sync</span>
+                            </label>
+                            <div class="fieldDescription checkboxFieldDescription">
+                                Changes are pushed a few seconds after the user favorites or unfavorites a channel, when this page is saved, and hourly.
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="verticalSection">
+                        <h2 class="sectionTitle">Dispatcharr Multiview</h2>
+
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="mvfUrl">Multiview server URL</label>
+                            <input is="emby-input" type="text" id="mvfUrl" placeholder="http://192.168.1.10:9292" />
+                            <div class="fieldDescription">The Multiview plugin's port (9292 by default), not the main Dispatcharr web port. Its <b>Web Dashboard</b> setting must be Enabled.</div>
+                        </div>
+
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="mvfDashPath">Dashboard mount path</label>
+                            <input is="emby-input" type="text" id="mvfDashPath" placeholder="/dash" />
+                            <div class="fieldDescription">Matches Multiview's "Dashboard Mount Path" setting.</div>
+                        </div>
+
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="mvfUsername">Dispatcharr username</label>
+                            <input is="emby-input" type="text" id="mvfUsername" autocomplete="off" />
+                        </div>
+
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="mvfPassword">Dispatcharr password</label>
+                            <input is="emby-input" type="password" id="mvfPassword" autocomplete="new-password" />
+                        </div>
+
+                        <div>
+                            <button is="emby-button" type="button" class="raised button-alt btnMvfTest"><span>Test connection</span></button>
+                            <div class="fieldDescription mvfTestResult" style="margin:.6em 0 1.5em;"></div>
+                        </div>
+                    </div>
+
+                    <div class="verticalSection">
+                        <h2 class="sectionTitle">Favorites to Multiview</h2>
+
+                        <div class="selectContainer">
+                            <label class="selectLabel" for="mvfUser">Emby user</label>
+                            <select is="emby-select" id="mvfUser"></select>
+                            <div class="fieldDescription">Whose Live TV favorites control the multiview.</div>
+                        </div>
+
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="mvfName">Multiview channel name</label>
+                            <input is="emby-input" type="text" id="mvfName" placeholder="Emby Favorites" />
+                            <div class="fieldDescription">Name of the layout in Dispatcharr Multiview. It is created if it doesn't exist; renaming it here renames the same layout.</div>
+                        </div>
+
+                        <div class="selectContainer">
+                            <label class="selectLabel" for="mvfMax">Maximum streams</label>
+                            <select is="emby-select" id="mvfMax">
+                                <option value="2">2</option>
+                                <option value="3">3</option>
+                                <option value="4">4 (recommended max)</option>
+                                <option value="5">5</option>
+                                <option value="6">6</option>
+                                <option value="7">7</option>
+                                <option value="8">8</option>
+                                <option value="9">9</option>
+                            </select>
+                            <div class="fieldDescription">Only this many favorites are tiled, picked in the tile order below. Each tile pulls its own stream from Dispatcharr.</div>
+                        </div>
+
+                        <div class="selectContainer">
+                            <label class="selectLabel" for="mvfOrder">Tile order</label>
+                            <select is="emby-select" id="mvfOrder">
+                                <option value="channel">Lowest channel number first</option>
+                                <option value="favorited">Oldest favorite first</option>
+                                <option value="manual">Manual</option>
+                            </select>
+                            <div class="fieldDescription">Decides which favorites make the cut and where they sit: the first one is tile 1 (the large tile in the Featured layouts).</div>
+                        </div>
+
+                        <div class="mvfManualSection hide" style="margin:-.5em 0 1.8em;">
+                            <div class="fieldDescription" style="margin-bottom:.6em;">
+                                Use the arrows to arrange the tiles. Channels favorited later are added to the end until you move them. Greyed-out channels aren't tiled.
+                            </div>
+                            <div class="mvfManualList" style="border:1px solid rgba(128,128,128,.3);border-radius:.4em;"></div>
+                            <div style="margin-top:.6em;">
+                                <button is="emby-button" type="button" class="raised button-alt btnMvfReload"><span>Reload favorites</span></button>
+                                <button is="emby-button" type="button" class="raised button-alt btnMvfResetOrder"><span>Reset to channel order</span></button>
+                            </div>
+                        </div>
+
+                        <div class="selectContainer">
+                            <label class="selectLabel" for="mvfLayout">Layout style</label>
+                            <select is="emby-select" id="mvfLayout">
+                                <option value="auto">Auto grid</option>
+                                <option value="featured">Featured (lowest channel large on the left)</option>
+                                <option value="top_featured">Top featured (lowest channel large on top)</option>
+                                <option value="">Don't change (use the style set in Dispatcharr)</option>
+                            </select>
+                        </div>
+
+                        <div class="selectContainer">
+                            <label class="selectLabel" for="mvfAudio">Audio</label>
+                            <select is="emby-select" id="mvfAudio">
+                                <option value="0">First tile (lowest channel number)</option>
+                                <option value="all">All tiles (one audio track per tile)</option>
+                                <option value="">Don't change (use the setting in Dispatcharr)</option>
+                            </select>
+                            <div class="fieldDescription">With "All tiles", switch which channel you hear from the player's audio track menu.</div>
+                        </div>
+
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label>
+                                <input is="emby-checkbox" type="checkbox" id="mvfRestart" />
+                                <span>Restart the multiview if it's playing when favorites change</span>
+                            </label>
+                            <div class="fieldDescription checkboxFieldDescription">
+                                Off: new tiles apply the next time the channel is tuned. On: anyone watching is disconnected so the player reconnects with the new tiles.
+                            </div>
+                        </div>
+
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label>
+                                <input is="emby-checkbox" type="checkbox" id="mvfGuide" />
+                                <span>Refresh the Emby guide when the multiview channel is created or renamed</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div>
+                        <button is="emby-button" type="submit" class="raised button-submit block"><span>Save</span></button>
+                    </div>
+                </form>
+
+                <div class="verticalSection" style="margin-top:2.5em;">
+                    <h2 class="sectionTitle">Status</h2>
+                    <div class="fieldDescription mvfLastSync"></div>
+                    <div style="margin:1em 0;">
+                        <button is="emby-button" type="button" class="raised btnMvfPreview"><span>Preview</span></button>
+                        <button is="emby-button" type="button" class="raised button-submit btnMvfSync"><span>Sync now</span></button>
+                    </div>
+                    <div class="fieldDescription">Preview uses the tile order shown above (saved or not). Sync uses the saved settings.</div>
+                    <div class="mvfResult" style="margin-top:1em;"></div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+</body>
+</html>
