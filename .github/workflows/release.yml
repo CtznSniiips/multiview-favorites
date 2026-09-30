@@ -1,0 +1,154 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Plugin version (e.g. 1.1.0). Tagged as v<version>."
+        required: true
+        type: string
+      emby_version:
+        description: "Emby Server version whose SDK the plugin is compiled against"
+        required: true
+        default: "4.10.1.0"
+        type: string
+      prerelease:
+        description: "Mark as a pre-release"
+        required: false
+        default: false
+        type: boolean
+      draft:
+        description: "Create as a draft (publish it by hand later)"
+        required: false
+        default: false
+        type: boolean
+      run_tests:
+        description: "Run the test suite before releasing"
+        required: false
+        default: true
+        type: boolean
+      multiview_ref:
+        description: "Branch/tag of swvn-dispatch/dispatcharr-multiview to test against"
+        required: false
+        default: "main"
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  VERSION: ${{ inputs.version }}
+  EMBY_VERSION: ${{ inputs.emby_version }}
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate inputs
+        run: |
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::version must look like 1.2.3 or 1.2.3.4 (got '$VERSION')"
+            exit 1
+          fi
+          if [[ ! "$EMBY_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::emby_version must look like 4.9.5.0 (got '$EMBY_VERSION')"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::Tag v$VERSION already exists. Pick a new version."
+            exit 1
+          fi
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Cache Emby SDK assemblies
+        uses: actions/cache@v4
+        with:
+          path: sdk
+          key: emby-sdk-${{ inputs.emby_version }}
+
+      - name: Build
+        run: |
+          chmod +x build.sh
+          ./build.sh
+          echo "### Built Emby.MultiviewFavorites $VERSION (Emby SDK $EMBY_VERSION)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check out Dispatcharr Multiview (for tests)
+        if: ${{ inputs.run_tests }}
+        uses: actions/checkout@v4
+        with:
+          repository: swvn-dispatch/dispatcharr-multiview
+          ref: ${{ inputs.multiview_ref }}
+          path: _multiview
+
+      - name: Test
+        if: ${{ inputs.run_tests }}
+        working-directory: tests/PlannerTests
+        env:
+          MV_SRC: ${{ github.workspace }}/_multiview/src
+        run: dotnet run -c Release
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          out="release"
+          name="Emby.MultiviewFavorites_${VERSION}"
+          mkdir -p "$out/$name"
+          cp dist/Emby.MultiviewFavorites.dll "$out/$name/"
+          cp README.md "$out/$name/"
+          [[ -f LICENSE ]] && cp LICENSE "$out/$name/"
+          (cd "$out" && zip -qr "$name.zip" "$name")
+          cp dist/Emby.MultiviewFavorites.dll "$out/"
+          (cd "$out" && sha256sum Emby.MultiviewFavorites.dll "$name.zip" > SHA256SUMS.txt)
+          cat "$out/SHA256SUMS.txt"
+
+      - name: Write release notes
+        run: |
+          {
+            echo "## Install"
+            echo
+            echo "1. Download \`Emby.MultiviewFavorites.dll\`."
+            echo "2. Copy it into your Emby Server \`plugins\` folder (e.g. \`/config/plugins\` in Docker)."
+            echo "3. Restart Emby, then open **Settings → Plugins → Multiview Favorites**."
+            echo
+            echo "Built against Emby Server SDK \`$EMBY_VERSION\` (runs on Emby 4.8+)."
+            echo
+            echo "SHA-256:"
+            echo '```'
+            cat release/SHA256SUMS.txt
+            echo '```'
+          } > release/NOTES.md
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          DRAFT: ${{ inputs.draft }}
+        run: |
+          flags=()
+          [[ "$PRERELEASE" == "true" ]] && flags+=(--prerelease)
+          [[ "$DRAFT" == "true" ]] && flags+=(--draft)
+          gh release create "v$VERSION" \
+            release/Emby.MultiviewFavorites.dll \
+            "release/Emby.MultiviewFavorites_${VERSION}.zip" \
+            release/SHA256SUMS.txt \
+            --target "$GITHUB_SHA" \
+            --title "v$VERSION" \
+            --notes-file release/NOTES.md \
+            --generate-notes \
+            "${flags[@]}"
+          echo "Released v$VERSION" >> "$GITHUB_STEP_SUMMARY"
