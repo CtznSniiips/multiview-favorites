@@ -10,7 +10,7 @@ on:
       emby_version:
         description: "Emby Server version whose SDK the plugin is compiled against"
         required: true
-        default: "4.10.1.0"
+        default: "4.9.5.0"
         type: string
       prerelease:
         description: "Mark as a pre-release"
