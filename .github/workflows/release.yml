@@ -22,6 +22,11 @@ on:
         required: false
         default: false
         type: boolean
+      auto_notes:
+        description: "Also append GitHub's auto-generated notes (merged PRs, contributors)"
+        required: false
+        default: false
+        type: boolean
       run_tests:
         description: "Run the test suite before releasing"
         required: false
@@ -70,6 +75,42 @@ jobs:
             exit 1
           fi
 
+      - name: Check changelog
+        # Finds the "## [<version>]" section in CHANGELOG.md (name matched case-insensitively).
+        # Headings like "## [1.2.0] - 2026-10-15", "## 1.2.0" and "## v1.2.0 (date)" all work.
+        # The section runs to the next "## " heading or the "[x.y.z]: https://..." link block.
+        run: |
+          set -euo pipefail
+          file="$(find . -maxdepth 1 -type f -iname 'changelog.md' | sort | head -n 1)"
+          if [[ -z "$file" ]]; then
+            echo "::error::No CHANGELOG.md in the repository root."
+            exit 1
+          fi
+
+          notes="$RUNNER_TEMP/changelog-section.md"
+          awk -v ver="$VERSION" '
+            /^##[ \t]/ {
+              if (found) exit
+              v = $0
+              sub(/^##[ \t]+/, "", v); sub(/^\[/, "", v); sub(/^[vV]/, "", v); sub(/[\] \t(].*$/, "", v)
+              if (v == ver) { found = 1; next }
+            }
+            found && /^\[[^\]]+\]:[ \t]*[a-z]+:\/\// { exit }
+            found { print }
+          ' "$file" | sed -e '/./,$!d' | sed -e ':a' -e '/^\n*$/{$d;N;ba' -e '}' > "$notes"
+
+          if [[ ! -s "$notes" ]] || ! grep -q '[^[:space:]]' "$notes"; then
+            echo "::error file=${file#./}::No release notes for $VERSION. Add a '## [$VERSION] - YYYY-MM-DD' section with the release's changes to ${file#./}, then run the workflow again."
+            exit 1
+          fi
+
+          echo "CHANGELOG_SECTION=$notes" >> "$GITHUB_ENV"
+          {
+            echo "### Changelog for $VERSION"
+            echo
+            cat "$notes"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:
@@ -110,6 +151,7 @@ jobs:
           mkdir -p "$out/$name"
           cp dist/Emby.MultiviewFavorites.dll "$out/$name/"
           cp README.md "$out/$name/"
+          find . -maxdepth 1 -type f -iname 'changelog.md' -exec cp {} "$out/$name/" \;
           [[ -f LICENSE ]] && cp LICENSE "$out/$name/"
           (cd "$out" && zip -qr "$name.zip" "$name")
           cp dist/Emby.MultiviewFavorites.dll "$out/"
@@ -119,6 +161,10 @@ jobs:
       - name: Write release notes
         run: |
           {
+            echo "## What's changed"
+            echo
+            cat "$CHANGELOG_SECTION"
+            echo
             echo "## Install"
             echo
             echo "1. Download \`Emby.MultiviewFavorites.dll\`."
@@ -138,10 +184,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PRERELEASE: ${{ inputs.prerelease }}
           DRAFT: ${{ inputs.draft }}
+          AUTO_NOTES: ${{ inputs.auto_notes }}
         run: |
           flags=()
           [[ "$PRERELEASE" == "true" ]] && flags+=(--prerelease)
           [[ "$DRAFT" == "true" ]] && flags+=(--draft)
+          [[ "$AUTO_NOTES" == "true" ]] && flags+=(--generate-notes)
           gh release create "v$VERSION" \
             release/Emby.MultiviewFavorites.dll \
             "release/Emby.MultiviewFavorites_${VERSION}.zip" \
@@ -149,6 +197,5 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "v$VERSION" \
             --notes-file release/NOTES.md \
-            --generate-notes \
             "${flags[@]}"
           echo "Released v$VERSION" >> "$GITHUB_STEP_SUMMARY"
