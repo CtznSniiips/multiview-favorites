@@ -1,4 +1,4 @@
-# Multiview Favorites for Emby
+# Multiview Favorites for Emby 
 
 An Emby server plugin that turns your users' **favorite Live TV channels** into [Dispatcharr Multiview](https://github.com/swvn-dispatch/dispatcharr-multiview) layouts, one multiview channel per user (or as many as you like).
 
@@ -8,6 +8,10 @@ Favorite a channel in any Emby app (Samsung, Android TV, Roku, web) and a few se
 Emby favorites (Steve) ──► match by channel number ──► first N ──► "Steve's Favorites" layout ──┐
 Emby favorites (Kids)  ──► match by channel number ──► first N ──► "Kids' Favorites" layout  ──┴─► M3U ──► Emby Live TV
 ```
+
+<p align="center">
+  <img src="https://github.com/CtznSniiips/multiview-favorites/blob/main/src/Emby.MultiviewFavorites/thumb.png?raw=true" width="256">
+</p>
 
 ## How it works
 
