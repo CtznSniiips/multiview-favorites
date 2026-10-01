@@ -100,7 +100,6 @@ Changing only the order counts as a tile change, so it follows the *Restart the 
 - **One per user, or more:** each multiview is independent. The usual setup is one per user, but two multiviews can follow the same user (with different stream limits or tile orders, say).
 - **Names must be unique:** each multiview gets its own Dispatcharr layout, and layouts are matched by name. The settings page won't save two with the same name.
 - **Pausing vs removing:** untick *Sync this multiview* to stop updating one but keep its layout. **Remove multiview** deletes its layout from Dispatcharr on the next save (you're asked to confirm). The Dispatcharr channel you mapped to it is left in place with no stream.
-- **Upgrading from 1.1:** your existing multiview is moved into the list automatically on first start, keeping its layout, user, order and all other settings.
 
 ## Behaviour notes
 
