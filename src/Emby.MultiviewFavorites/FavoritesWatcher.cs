@@ -37,6 +37,16 @@ namespace Emby.MultiviewFavorites
 
         public void Run()
         {
+            try
+            {
+                var migrated = Plugin.Instance?.EnsureMigrated();
+                if (migrated != null) _logger.Info("moved the 1.x settings into multiview \"{0}\"", migrated);
+            }
+            catch (Exception ex)
+            {
+                _logger.ErrorException("could not migrate 1.x settings (they'll be migrated on the next save)", ex);
+            }
+
             SyncCoordinator.Initialize(_engine);
             _userDataManager.UserDataSaved += OnUserDataSaved;
 

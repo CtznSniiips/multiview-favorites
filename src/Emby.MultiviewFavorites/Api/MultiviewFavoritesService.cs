@@ -1,3 +1,5 @@
+using System;
+using System.Linq;
 using System.Threading;
 using Emby.MultiviewFavorites.Configuration;
 using Emby.MultiviewFavorites.Sync;
@@ -16,15 +18,19 @@ namespace Emby.MultiviewFavorites.Api
     {
     }
 
-    [Route("/MultiviewFavorites/Preview", "GET", Summary = "Shows what a sync would do, without changing anything")]
+    [Route("/MultiviewFavorites/Preview", "POST", Summary = "Shows what syncing one (possibly unsaved) multiview would do, without changing anything")]
     [Authenticated(Roles = "Admin")]
     public class PreviewRequest : IReturn<SyncResult>
     {
-        /// <summary>Optional: channel | favorited | manual, to preview an unsaved choice.</summary>
+        public string Id { get; set; }
+        public string EmbyUserId { get; set; }
+        public string MultiviewName { get; set; }
+        public int MaxStreams { get; set; }
         public string TileOrder { get; set; }
-
-        /// <summary>Optional: comma-separated Emby channel ids, to preview an unsaved manual order.</summary>
-        public string ManualOrder { get; set; }
+        public string[] ManualOrder { get; set; }
+        public string LayoutStyle { get; set; }
+        public string AudioSource { get; set; }
+        public string LayoutId { get; set; }
     }
 
     [Route("/MultiviewFavorites/Test", "POST", Summary = "Tests the Dispatcharr connection with the given (unsaved) settings")]
@@ -55,15 +61,27 @@ namespace Emby.MultiviewFavorites.Api
 
         public object Post(SyncNowRequest request)
         {
-            return _engine.RunAsync("manual sync", dryRun: false, CancellationToken.None).GetAwaiter().GetResult();
+            return _engine.RunAsync("manual sync", CancellationToken.None).GetAwaiter().GetResult();
         }
 
-        public object Get(PreviewRequest request)
+        public object Post(PreviewRequest request)
         {
-            var manual = request.ManualOrder == null
-                ? null
-                : request.ManualOrder.Split(new[] { ',' }, System.StringSplitOptions.RemoveEmptyEntries);
-            return _engine.RunAsync("preview", true, request.TileOrder, manual, CancellationToken.None).GetAwaiter().GetResult();
+            var saved = (Plugin.Instance?.Configuration?.Profiles ?? new MultiviewProfile[0])
+                .FirstOrDefault(p => p != null && !string.IsNullOrEmpty(request.Id) && p.Id == request.Id);
+            var profile = new MultiviewProfile
+            {
+                Id = string.IsNullOrEmpty(request.Id) ? Guid.NewGuid().ToString("N") : request.Id,
+                Enabled = true,
+                EmbyUserId = request.EmbyUserId ?? "",
+                MultiviewName = request.MultiviewName,
+                MaxStreams = Math.Max(2, Math.Min(SyncPlanner.MaxSlots, request.MaxStreams <= 0 ? 4 : request.MaxStreams)),
+                TileOrder = TileOrders.Normalize(request.TileOrder),
+                ManualOrder = request.ManualOrder ?? new string[0],
+                LayoutStyle = request.LayoutStyle ?? "auto",
+                AudioSource = request.AudioSource ?? "0",
+                LayoutId = !string.IsNullOrEmpty(request.LayoutId) ? request.LayoutId : saved?.LayoutId ?? "",
+            };
+            return _engine.PreviewAsync(profile, CancellationToken.None).GetAwaiter().GetResult();
         }
 
         public object Post(TestConnectionRequest request)

@@ -47,6 +47,38 @@ namespace Emby.MultiviewFavorites.Sync
 
         /// <summary>Emby channel ids in the user's preferred order (manual mode).</summary>
         public IList<string> ManualOrder { get; set; } = new List<string>();
+
+        /// <summary>Names of other multiview channels (never tiled, even if favorited).</summary>
+        public IList<string> OtherMultiviewNames { get; set; } = new List<string>();
+    }
+
+    /// <summary>One multiview channel to plan in a multi-profile sync.</summary>
+    public class ProfilePlanInput
+    {
+        public string ProfileId { get; set; }
+        public IList<FavoriteChannel> Favorites { get; set; } = new List<FavoriteChannel>();
+        public SyncOptions Options { get; set; } = new SyncOptions();
+    }
+
+    public class MultiPlan
+    {
+        /// <summary>Per profile, in input order.</summary>
+        public List<KeyValuePair<string, SyncPlan>> Plans { get; set; } = new List<KeyValuePair<string, SyncPlan>>();
+
+        /// <summary>Layouts removed from Dispatcharr by this sync.</summary>
+        public List<string> DeletedLayoutIds { get; set; } = new List<string>();
+
+        /// <summary>Queued deletions whose layout no longer exists in Dispatcharr (nothing to do).</summary>
+        public List<string> AlreadyGoneLayoutIds { get; set; } = new List<string>();
+
+        /// <summary>Every change for every profile, merged into one settings patch.</summary>
+        public Dictionary<string, object> Updates { get; set; } = new Dictionary<string, object>();
+
+        public bool HasChanges => Updates.Count > 0;
+
+        /// <summary>A layout was created, renamed or deleted, so Multiview's M3U must be regenerated.</summary>
+        public bool NeedsM3uRefresh =>
+            DeletedLayoutIds.Count > 0 || Plans.Any(p => p.Value.IsNewLayout || p.Value.Renamed);
     }
 
     /// <summary>One row per Emby favorite, for logs and the config page table.</summary>
@@ -133,6 +165,10 @@ namespace Emby.MultiviewFavorites.Sync
 
             // Names of every multiview output, so a favorited multiview channel never tiles itself.
             var multiviewNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { name };
+            foreach (var other in options.OtherMultiviewNames ?? new List<string>())
+            {
+                if (!string.IsNullOrWhiteSpace(other)) multiviewNames.Add(other.Trim());
+            }
             foreach (var id in order)
             {
                 var n = MiniJson.GetString(settings, $"multiview_{id}_name");
@@ -273,6 +309,75 @@ namespace Emby.MultiviewFavorites.Sync
             plan.Renamed = !plan.IsNewLayout && plan.Updates.ContainsKey(p + "name");
             plan.TilesChanged = plan.IsNewLayout || !CurrentTiles(settings, p).SequenceEqual(selected);
             return plan;
+        }
+
+        /// <summary>
+        /// Plans several multiview channels against one snapshot of Dispatcharr's settings.
+        /// Each profile is planned against the settings as they'll be after the previous
+        /// profiles' changes, so two layouts created in the same sync don't both append to the
+        /// same old multiview_order. Deletions of removed profiles' layouts happen first.
+        /// The result is a single merged patch.
+        /// </summary>
+        public static MultiPlan BuildAll(
+            IEnumerable<ProfilePlanInput> profiles,
+            IList<DispatcharrChannel> dispatcharrChannels,
+            Dictionary<string, object> settings,
+            IEnumerable<string> layoutsToDelete = null,
+            Func<string> newIdFactory = null)
+        {
+            var multi = new MultiPlan();
+            var working = new Dictionary<string, object>(settings ?? new Dictionary<string, object>(), StringComparer.Ordinal);
+            var order = OrderOf(working);
+            var orderChanged = false;
+
+            // ---------------------------------------------------- deletions
+            foreach (var raw in layoutsToDelete ?? Enumerable.Empty<string>())
+            {
+                var id = (raw ?? "").Trim();
+                if (id.Length == 0 || multi.DeletedLayoutIds.Contains(id) || multi.AlreadyGoneLayoutIds.Contains(id)) continue;
+                if (!order.Contains(id))
+                {
+                    multi.AlreadyGoneLayoutIds.Add(id);
+                    continue;
+                }
+                var prefix = $"multiview_{id}_";
+                foreach (var key in working.Keys.Where(k => k.StartsWith(prefix, StringComparison.Ordinal)).ToList())
+                {
+                    working.Remove(key);
+                    multi.Updates[key] = null;
+                }
+                order.Remove(id);
+                orderChanged = true;
+                multi.DeletedLayoutIds.Add(id);
+            }
+            if (orderChanged) working["multiview_order"] = order.Cast<object>().ToList();
+
+            // ---------------------------------------------------- profiles
+            foreach (var input in profiles ?? Enumerable.Empty<ProfilePlanInput>())
+            {
+                var plan = Build(input.Favorites, dispatcharrChannels, working, input.Options, newIdFactory);
+                multi.Plans.Add(new KeyValuePair<string, SyncPlan>(input.ProfileId, plan));
+
+                foreach (var kv in plan.Updates)
+                {
+                    if (kv.Value == null) working.Remove(kv.Key);
+                    else working[kv.Key] = kv.Value;
+                    multi.Updates[kv.Key] = kv.Value;
+                }
+                if (plan.IsNewLayout) orderChanged = true;
+            }
+
+            // The patch must carry the final order (not an intermediate one).
+            if (orderChanged) multi.Updates["multiview_order"] = OrderOf(working).Cast<object>().ToList();
+            return multi;
+        }
+
+        private static List<string> OrderOf(Dictionary<string, object> settings)
+        {
+            return (MiniJson.AsArray(MiniJson.Get(settings, "multiview_order")) ?? new List<object>())
+                .Select(MiniJson.ToCanonical)
+                .Where(s => !string.IsNullOrEmpty(s))
+                .ToList();
         }
 
         private sealed class Ranked

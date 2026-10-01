@@ -31,6 +31,8 @@ namespace Emby.MultiviewFavorites.Sync
     public class DispatcharrClient
     {
         private static readonly HttpClient Http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+        private const int MaxAttempts = 2;
+        private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(500);
 
         private readonly string _apiBase;
         private readonly string _username;
@@ -129,62 +131,71 @@ namespace Emby.MultiviewFavorites.Sync
         private async Task<object> SendAsync(HttpMethod method, string path, string jsonBody, bool authenticated, CancellationToken ct)
         {
             var url = _apiBase + path;
-            using (var req = new HttpRequestMessage(method, url))
+            if (authenticated && _accessToken == null) await LoginAsync(ct).ConfigureAwait(false);
+
+            HttpResponseMessage resp = null;
+            for (var attempt = 1; resp == null; attempt++)
             {
-                if (jsonBody != null)
-                    req.Content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
-                if (authenticated)
+                // A request message can only be sent once, so build a fresh one per attempt.
+                using (var req = new HttpRequestMessage(method, url))
                 {
-                    if (_accessToken == null) await LoginAsync(ct).ConfigureAwait(false);
-                    req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _accessToken);
-                }
+                    if (jsonBody != null)
+                        req.Content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
+                    if (authenticated)
+                        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _accessToken);
 
-                HttpResponseMessage resp;
-                try
-                {
-                    resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
-                }
-                catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
-                {
-                    throw new DispatcharrException($"Timed out contacting {url}.", ex);
-                }
-                catch (HttpRequestException ex)
-                {
-                    throw new DispatcharrException($"Could not reach {url}: {ex.Message}", ex);
-                }
-
-                using (resp)
-                {
-                    var text = resp.Content == null ? "" : await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-
-                    if (!resp.IsSuccessStatusCode)
-                    {
-                        string detail = null;
-                        try { detail = MiniJson.GetString(MiniJson.AsObject(MiniJson.Parse(text)), "error"); } catch { /* not JSON */ }
-
-                        if (resp.StatusCode == HttpStatusCode.NotFound)
-                        {
-                            throw new DispatcharrException(
-                                $"{url} returned 404. Make sure the Multiview plugin's \"Web Dashboard\" setting is Enabled " +
-                                "(then restart Dispatcharr) and that the Dashboard Mount Path matches." +
-                                (detail != null ? " (" + detail + ")" : ""));
-                        }
-                        if (resp.StatusCode == HttpStatusCode.Unauthorized)
-                        {
-                            throw new DispatcharrException("Dispatcharr rejected the credentials" + (detail != null ? ": " + detail : "."));
-                        }
-                        throw new DispatcharrException($"{method} {url} failed: {(int)resp.StatusCode} {detail ?? resp.ReasonPhrase}");
-                    }
-
-                    if (string.IsNullOrWhiteSpace(text)) return null;
                     try
                     {
-                        return MiniJson.Parse(text);
+                        resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
                     }
-                    catch (FormatException ex)
+                    catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
                     {
-                        throw new DispatcharrException($"{url} returned something that isn't JSON. Is the URL pointing at the Multiview plugin (port 9292)?", ex);
+                        throw new DispatcharrException($"Timed out contacting {url}.", ex);
                     }
+                    catch (HttpRequestException) when (attempt < MaxAttempts && !ct.IsCancellationRequested)
+                    {
+                        // The connection dropped before any response (reset, closed early, stale
+                        // keep-alive). Every call here is safe to repeat, so try once more.
+                        await Task.Delay(RetryDelay, ct).ConfigureAwait(false);
+                    }
+                    catch (HttpRequestException ex)
+                    {
+                        throw new DispatcharrException($"Could not reach {url}: {ex.Message}", ex);
+                    }
+                }
+            }
+
+            using (resp)
+            {
+                var text = resp.Content == null ? "" : await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+                if (!resp.IsSuccessStatusCode)
+                {
+                    string detail = null;
+                    try { detail = MiniJson.GetString(MiniJson.AsObject(MiniJson.Parse(text)), "error"); } catch { /* not JSON */ }
+
+                    if (resp.StatusCode == HttpStatusCode.NotFound)
+                    {
+                        throw new DispatcharrException(
+                            $"{url} returned 404. Make sure the Multiview plugin's \"Web Dashboard\" setting is Enabled " +
+                            "(then restart Dispatcharr) and that the Dashboard Mount Path matches." +
+                            (detail != null ? " (" + detail + ")" : ""));
+                    }
+                    if (resp.StatusCode == HttpStatusCode.Unauthorized)
+                    {
+                        throw new DispatcharrException("Dispatcharr rejected the credentials" + (detail != null ? ": " + detail : "."));
+                    }
+                    throw new DispatcharrException($"{method} {url} failed: {(int)resp.StatusCode} {detail ?? resp.ReasonPhrase}");
+                }
+
+                if (string.IsNullOrWhiteSpace(text)) return null;
+                try
+                {
+                    return MiniJson.Parse(text);
+                }
+                catch (FormatException ex)
+                {
+                    throw new DispatcharrException($"{url} returned something that isn't JSON. Is the URL pointing at the Multiview plugin (port 9292)?", ex);
                 }
             }
         }

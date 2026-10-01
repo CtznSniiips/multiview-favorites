@@ -4,5 +4,13 @@
     <Compile Include="../../src/Emby.MultiviewFavorites/Sync/MiniJson.cs" Link="MiniJson.cs" />
     <Compile Include="../../src/Emby.MultiviewFavorites/Sync/DispatcharrClient.cs" Link="DispatcharrClient.cs" />
     <Compile Include="../../src/Emby.MultiviewFavorites/Sync/SyncPlanner.cs" Link="SyncPlanner.cs" />
+    <Compile Include="../../src/Emby.MultiviewFavorites/Configuration/PluginConfiguration.cs" Link="PluginConfiguration.cs" />
+    <Compile Include="../../src/Emby.MultiviewFavorites/Configuration/ConfigNormalizer.cs" Link="ConfigNormalizer.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- For BasePluginConfiguration. build.sh fetches it into ../../sdk. -->
+    <Reference Include="MediaBrowser.Model">
+      <HintPath>../../sdk/MediaBrowser.Model.dll</HintPath>
+    </Reference>
   </ItemGroup>
 </Project>

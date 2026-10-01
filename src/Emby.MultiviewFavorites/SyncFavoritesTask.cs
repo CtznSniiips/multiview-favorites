@@ -35,14 +35,14 @@ namespace Emby.MultiviewFavorites
 
         public string Key => "MultiviewFavoritesSync";
 
-        public string Description => "Pushes the configured user's favorite Live TV channels into the Dispatcharr multiview layout.";
+        public string Description => "Pushes each multiview's user's favorite Live TV channels into its Dispatcharr Multiview layout.";
 
         public string Category => "Live TV";
 
         public async Task Execute(CancellationToken cancellationToken, IProgress<double> progress)
         {
             progress?.Report(0);
-            var result = await _engine.RunAsync("scheduled task", dryRun: false, cancellationToken).ConfigureAwait(false);
+            var result = await _engine.RunAsync("scheduled task", cancellationToken).ConfigureAwait(false);
             progress?.Report(100);
             if (!result.Success && Plugin.Instance?.Configuration?.Enabled == true)
                 throw new Exception(result.Message);

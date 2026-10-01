@@ -9,6 +9,25 @@ workflow. The workflow copies that section into the GitHub release notes and fai
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-01
+
+### Added
+- **Multiple multiview channels:** set up as many multiviews as you like, each following one Emby user's favorites
+  with its own Dispatcharr layout, stream limit, tile order, layout style and audio.
+- *Add one for each user* creates a "*Name*'s Favorites" multiview for every Emby user who doesn't have one.
+- Pause a multiview (keeps its layout) or remove it (deletes its layout from Dispatcharr on save, after a confirmation).
+- *Sync all now* shows the result for every multiview; each multiview shows its own last-sync status.
+- Preview works on unsaved multiviews.
+
+### Changed
+- Existing single-multiview settings are moved into the new list automatically on first start, keeping the same layout.
+- All multiviews are synced together and sent to Dispatcharr as a single settings update.
+- A multiview is never tiled into another multiview, even if favorited.
+- The Dispatcharr client retries once if a connection drops before Dispatcharr responds.
+
+### Fixed
+- Test harness no longer depends on a fixed port and can't stall on the mock server's output.
+
 ## [1.1.0] - 2026-09-30
 
 ### Added

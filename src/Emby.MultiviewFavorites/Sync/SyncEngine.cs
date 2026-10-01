@@ -13,17 +13,30 @@ using MediaBrowser.Model.Tasks;
 
 namespace Emby.MultiviewFavorites.Sync
 {
+    /// <summary>Outcome for one multiview channel.</summary>
+    public class ProfileResult
+    {
+        public string ProfileId { get; set; }
+        public string Name { get; set; }
+        public string UserName { get; set; }
+        public bool Success { get; set; }
+        public bool Changed { get; set; }
+        public bool CreatedLayout { get; set; }
+        public string LayoutId { get; set; }
+        public string Message { get; set; }
+        public List<FavoriteRow> Rows { get; set; } = new List<FavoriteRow>();
+        public List<string> Warnings { get; set; } = new List<string>();
+    }
+
     public class SyncResult
     {
         public bool Success { get; set; }
         public bool DryRun { get; set; }
         public bool Changed { get; set; }
-        public bool CreatedLayout { get; set; }
-        public string LayoutId { get; set; }
         public string Message { get; set; }
         public string TimestampUtc { get; set; }
-        public List<FavoriteRow> Rows { get; set; } = new List<FavoriteRow>();
-        public List<string> Warnings { get; set; } = new List<string>();
+        public List<ProfileResult> Profiles { get; set; } = new List<ProfileResult>();
+        public List<string> DeletedLayouts { get; set; } = new List<string>();
     }
 
     public class SyncEngine
@@ -55,28 +68,20 @@ namespace Emby.MultiviewFavorites.Sync
 
         private static PluginConfiguration Config => Plugin.Instance?.Configuration ?? new PluginConfiguration();
 
-        /// <summary>
-        /// Reads the configured user's Live TV favorites, matches them to Dispatcharr channels by
-        /// channel number, and writes the lowest-numbered N into the multiview layout.
-        /// dryRun computes and returns the plan without writing anything.
-        /// </summary>
-        public Task<SyncResult> RunAsync(string reason, bool dryRun, CancellationToken ct)
-        {
-            return RunAsync(reason, dryRun, null, null, ct);
-        }
+        private static string Now() => DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
 
-        /// <param name="tileOrderOverride">Preview only: try a tile order without saving it.</param>
-        /// <param name="manualOrderOverride">Preview only: try a manual order without saving it.</param>
-        public async Task<SyncResult> RunAsync(string reason, bool dryRun, string tileOrderOverride, IList<string> manualOrderOverride, CancellationToken ct)
+        /// <summary>
+        /// Syncs every enabled multiview channel: reads each profile's user's Live TV favorites,
+        /// matches them to Dispatcharr channels by number, and writes the first N (in the profile's
+        /// tile order) into that profile's layout. Layouts of removed profiles are deleted.
+        /// All changes go to Dispatcharr as one settings patch.
+        /// </summary>
+        public async Task<SyncResult> RunAsync(string reason, CancellationToken ct)
         {
             var cfg = Config;
-            var result = new SyncResult
-            {
-                DryRun = dryRun,
-                TimestampUtc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture),
-            };
+            var result = new SyncResult { TimestampUtc = Now() };
 
-            if (!dryRun && !cfg.Enabled)
+            if (!cfg.Enabled)
             {
                 result.Message = "Sync is disabled.";
                 return result;
@@ -85,71 +90,61 @@ namespace Emby.MultiviewFavorites.Sync
             await Gate.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                var user = ResolveUser(cfg.EmbyUserId);
-                if (user == null)
-                    throw new DispatcharrException("Choose an Emby user whose favorites should drive the multiview.");
+                var enabled = (cfg.Profiles ?? new MultiviewProfile[0]).Where(p => p != null && p.Enabled).ToList();
+                var pendingDeletes = (cfg.LayoutsToDelete ?? new string[0]).ToList();
+                var inputs = Prepare(enabled, cfg.Profiles, result, ct);
 
-                var favorites = GetFavoriteChannels(user, ct);
-                _logger.Info("sync ({0}) - {1} favorite Live TV channel(s) for {2}", reason, favorites.Count, user.Name);
+                if (inputs.Count == 0 && pendingDeletes.Count == 0)
+                {
+                    result.Success = result.Profiles.Count == 0;
+                    result.Message = result.Profiles.Count == 0
+                        ? "No multiview channels are enabled."
+                        : "Nothing could be synced. See each multiview's status.";
+                    SaveState(result, new List<string>());
+                    return result;
+                }
 
-                var client = new DispatcharrClient(cfg.DispatcharrUrl, cfg.DashPath, cfg.DispatcharrUsername, cfg.DispatcharrPassword);
+                var client = NewClient(cfg);
                 await client.LoginAsync(ct).ConfigureAwait(false);
                 var channels = await client.GetChannelsAsync(ct).ConfigureAwait(false);
                 var settings = await client.GetSettingsAsync(ct).ConfigureAwait(false);
 
-                var effectiveOrder = dryRun && !string.IsNullOrEmpty(tileOrderOverride) ? tileOrderOverride : cfg.TileOrder;
-                var plan = SyncPlanner.Build(favorites, channels, settings, new SyncOptions
+                var multi = SyncPlanner.BuildAll(inputs.Select(i => i.Input), channels, settings, pendingDeletes);
+                Collect(multi, inputs, result, preview: false);
+
+                if (multi.HasChanges)
                 {
-                    MultiviewName = cfg.MultiviewName,
-                    MaxStreams = cfg.MaxStreams,
-                    LayoutStyle = cfg.LayoutStyle,
-                    AudioSource = cfg.AudioSource,
-                    KnownLayoutId = cfg.LayoutId,
-                    TileOrder = effectiveOrder,
-                    ManualOrder = dryRun && manualOrderOverride != null
-                        ? manualOrderOverride
-                        : (IList<string>)(cfg.ManualOrder ?? new string[0]),
-                });
-
-                result.LayoutId = plan.LayoutId;
-                result.Rows = plan.Rows;
-                result.Warnings = plan.Warnings;
-                result.CreatedLayout = plan.IsNewLayout;
-                result.Changed = plan.HasChanges;
-
-                foreach (var w in plan.Warnings) _logger.Warn("{0}", w);
-
-                if (dryRun)
-                {
-                    result.Success = true;
-                    result.Message = Describe(plan, true, effectiveOrder);
-                    return result;
-                }
-
-                if (plan.HasChanges)
-                {
-                    await client.PatchSettingsAsync(plan.Updates, ct).ConfigureAwait(false);
-                    _logger.Info("updated layout {0} ({1} key(s)); tiles = [{2}]",
-                        plan.LayoutId, plan.Updates.Count, string.Join(", ", plan.TileIds));
-
-                    if (plan.IsNewLayout || plan.Renamed)
+                    await client.PatchSettingsAsync(multi.Updates, ct).ConfigureAwait(false);
+                    foreach (var kv in multi.Plans.Where(p => p.Value.HasChanges))
                     {
-                        // New/renamed layout needs a new M3U entry before it can show up anywhere.
+                        _logger.Info("updated layout {0}; tiles = [{1}]", kv.Value.LayoutId, string.Join(", ", kv.Value.TileIds));
+                    }
+                    foreach (var id in multi.DeletedLayoutIds) _logger.Info("deleted layout {0} (its multiview was removed)", id);
+
+                    if (multi.NeedsM3uRefresh)
+                    {
+                        // Created/renamed/deleted layouts change Multiview's M3U.
                         await client.RefreshM3uAsync(ct).ConfigureAwait(false);
                         _logger.Info("asked Dispatcharr to regenerate the multiview M3U/EPG");
                         if (cfg.RefreshEmbyGuideOnCreate) QueueGuideRefresh();
                     }
 
-                    if (plan.TilesChanged && !plan.IsNewLayout && cfg.RestartActiveStream)
+                    if (cfg.RestartActiveStream)
                     {
-                        var killed = await client.RestartStreamAsync(plan.LayoutId, ct).ConfigureAwait(false);
-                        if (killed > 0) _logger.Info("restarted {0} running multiview stream(s)", killed);
+                        foreach (var kv in multi.Plans.Where(p => p.Value.TilesChanged && !p.Value.IsNewLayout))
+                        {
+                            var killed = await client.RestartStreamAsync(kv.Value.LayoutId, ct).ConfigureAwait(false);
+                            if (killed > 0) _logger.Info("restarted {0} running stream(s) of layout {1}", killed, kv.Value.LayoutId);
+                        }
                     }
                 }
 
-                result.Success = true;
-                result.Message = Describe(plan, false, effectiveOrder);
-                SaveState(plan.LayoutId, result.Message);
+                result.DeletedLayouts = multi.DeletedLayoutIds;
+                result.Changed = multi.HasChanges;
+                result.Success = result.Profiles.All(p => p.Success);
+                result.Message = Summarize(result, preview: false);
+                SaveState(result, multi.DeletedLayoutIds.Concat(multi.AlreadyGoneLayoutIds).ToList());
+                _logger.Info("sync ({0}): {1}", reason, result.Message);
                 return result;
             }
             catch (OperationCanceledException)
@@ -163,13 +158,157 @@ namespace Emby.MultiviewFavorites.Sync
 
                 result.Success = false;
                 result.Message = ex.Message;
-                if (!dryRun) SaveState(null, "Failed: " + ex.Message);
+                foreach (var p in result.Profiles.Where(p => p.Success))
+                {
+                    p.Success = false;
+                    p.Message = ex.Message;
+                }
+                SaveState(result, new List<string>(), "Failed: " + ex.Message);
                 return result;
             }
             finally
             {
                 Gate.Release();
             }
+        }
+
+        /// <summary>
+        /// Shows what syncing one (possibly unsaved) multiview would do, without changing anything.
+        /// </summary>
+        public async Task<SyncResult> PreviewAsync(MultiviewProfile profile, CancellationToken ct)
+        {
+            var cfg = Config;
+            var result = new SyncResult { DryRun = true, TimestampUtc = Now() };
+            try
+            {
+                var others = (cfg.Profiles ?? new MultiviewProfile[0]).Where(p => p != null && p.Id != profile.Id).ToList();
+                var inputs = Prepare(new List<MultiviewProfile> { profile }, others.Concat(new[] { profile }), result, ct);
+                if (inputs.Count == 0)
+                {
+                    result.Message = result.Profiles.FirstOrDefault()?.Message;
+                    return result;
+                }
+
+                var client = NewClient(cfg);
+                await client.LoginAsync(ct).ConfigureAwait(false);
+                var channels = await client.GetChannelsAsync(ct).ConfigureAwait(false);
+                var settings = await client.GetSettingsAsync(ct).ConfigureAwait(false);
+
+                var multi = SyncPlanner.BuildAll(inputs.Select(i => i.Input), channels, settings);
+                Collect(multi, inputs, result, preview: true);
+                result.Changed = multi.HasChanges;
+                result.Success = result.Profiles.All(p => p.Success);
+                result.Message = result.Profiles.FirstOrDefault()?.Message;
+                return result;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                result.Success = false;
+                result.Message = ex.Message;
+                return result;
+            }
+        }
+
+        private sealed class Prepared
+        {
+            public MultiviewProfile Profile;
+            public ProfileResult Result;
+            public ProfilePlanInput Input;
+        }
+
+        /// <summary>
+        /// Resolves users and favorites for each profile. Profiles that can't be synced
+        /// (no user, duplicate name) get a failed ProfileResult and are left out of the plan.
+        /// </summary>
+        private List<Prepared> Prepare(List<MultiviewProfile> profiles, IEnumerable<MultiviewProfile> allProfiles, SyncResult result, CancellationToken ct)
+        {
+            var all = (allProfiles ?? Enumerable.Empty<MultiviewProfile>()).Where(p => p != null).ToList();
+            var duplicates = ConfigNormalizer.DuplicateNames(all.Where(p => p.Enabled || profiles.Contains(p)));
+            var list = new List<Prepared>();
+
+            foreach (var profile in profiles)
+            {
+                var name = string.IsNullOrWhiteSpace(profile.MultiviewName) ? ConfigNormalizer.DefaultName : profile.MultiviewName.Trim();
+                var pr = new ProfileResult { ProfileId = profile.Id, Name = name, LayoutId = profile.LayoutId };
+                result.Profiles.Add(pr);
+
+                var user = ResolveUser(profile.EmbyUserId);
+                pr.UserName = user?.Name;
+                if (user == null)
+                {
+                    pr.Message = "Choose an Emby user for this multiview.";
+                    continue;
+                }
+                if (duplicates.Contains(name))
+                {
+                    pr.Message = $"Another multiview is also named \"{name}\". Each multiview needs its own name.";
+                    continue;
+                }
+
+                var favorites = GetFavoriteChannels(user, ct);
+                _logger.Debug("{0}: {1} favorite Live TV channel(s) for {2}", name, favorites.Count, user.Name);
+
+                list.Add(new Prepared
+                {
+                    Profile = profile,
+                    Result = pr,
+                    Input = new ProfilePlanInput
+                    {
+                        ProfileId = profile.Id,
+                        Favorites = favorites,
+                        Options = new SyncOptions
+                        {
+                            MultiviewName = name,
+                            MaxStreams = profile.MaxStreams,
+                            LayoutStyle = profile.LayoutStyle,
+                            AudioSource = profile.AudioSource,
+                            KnownLayoutId = profile.LayoutId,
+                            TileOrder = profile.TileOrder,
+                            ManualOrder = profile.ManualOrder ?? new string[0],
+                            OtherMultiviewNames = all.Where(p => p.Id != profile.Id).Select(p => p.MultiviewName).ToList(),
+                        },
+                    },
+                });
+            }
+            return list;
+        }
+
+        private void Collect(MultiPlan multi, List<Prepared> inputs, SyncResult result, bool preview)
+        {
+            foreach (var prep in inputs)
+            {
+                var plan = multi.Plans.First(p => p.Key == prep.Profile.Id).Value;
+                var pr = prep.Result;
+                pr.LayoutId = plan.LayoutId;
+                pr.Rows = plan.Rows;
+                pr.Warnings = plan.Warnings;
+                pr.CreatedLayout = plan.IsNewLayout;
+                pr.Changed = plan.HasChanges;
+                pr.Success = true;
+                pr.Message = Describe(plan, preview, prep.Profile.TileOrder);
+                foreach (var w in plan.Warnings) _logger.Warn("{0}: {1}", pr.Name, w);
+            }
+        }
+
+        private static DispatcharrClient NewClient(PluginConfiguration cfg)
+        {
+            return new DispatcharrClient(cfg.DispatcharrUrl, cfg.DashPath, cfg.DispatcharrUsername, cfg.DispatcharrPassword);
+        }
+
+        private static string Summarize(SyncResult result, bool preview)
+        {
+            var ok = result.Profiles.Count(p => p.Success);
+            var failed = result.Profiles.Count - ok;
+            var changed = result.Profiles.Count(p => p.Changed);
+            var parts = new List<string> { $"{ok} multiview(s) synced" };
+            if (changed > 0) parts.Add($"{changed} updated");
+            if (failed > 0) parts.Add($"{failed} need attention");
+            if (result.DeletedLayouts.Count > 0) parts.Add($"{result.DeletedLayouts.Count} removed layout(s) deleted");
+            return string.Join(", ", parts) + ".";
         }
 
         public async Task<SyncResult> TestConnectionAsync(PluginConfiguration cfg, CancellationToken ct)
@@ -193,10 +332,16 @@ namespace Emby.MultiviewFavorites.Sync
             return result;
         }
 
+        /// <summary>True if any enabled multiview uses this user's favorites.</summary>
         public bool IsConfiguredUser(User user)
         {
             if (user == null) return false;
-            var configured = Config.EmbyUserId;
+            return (Config.Profiles ?? new MultiviewProfile[0])
+                .Any(p => p != null && p.Enabled && UserMatches(user, p.EmbyUserId));
+        }
+
+        private static bool UserMatches(User user, string configured)
+        {
             if (string.IsNullOrWhiteSpace(configured)) return false;
             if (Guid.TryParse(configured, out var g) && g == user.Id) return true;
             return string.Equals(configured, user.Id.ToString("N"), StringComparison.OrdinalIgnoreCase)
@@ -310,22 +455,41 @@ namespace Emby.MultiviewFavorites.Sync
                 default: order = "lowest channel number first"; break;
             }
             string what;
-            if (plan.IsNewLayout) what = preview ? "Will create the multiview layout" : "Created the multiview layout";
-            else if (plan.HasChanges) what = preview ? "Will update the multiview layout" : "Updated the multiview layout";
-            else what = "Multiview already up to date";
+            if (plan.IsNewLayout) what = preview ? "Will create the layout" : "Created the layout";
+            else if (plan.HasChanges) what = preview ? "Will update the layout" : "Updated the layout";
+            else what = "Up to date";
             return $"{what} with {tiles} channel(s), {order}.";
         }
 
-        private void SaveState(string layoutId, string status)
+        /// <summary>
+        /// Writes per-profile layout ids and statuses back to the live config (matched by profile id,
+        /// since the settings page may have saved a new config object during the sync) and drops
+        /// processed layout deletions from the queue.
+        /// </summary>
+        private void SaveState(SyncResult result, List<string> processedDeletes, string failure = null)
         {
             var plugin = Plugin.Instance;
             if (plugin == null) return;
             try
             {
                 var cfg = plugin.Configuration;
-                if (!string.IsNullOrEmpty(layoutId)) cfg.LayoutId = layoutId;
-                cfg.LastSyncUtc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
-                cfg.LastSyncStatus = status ?? "";
+                var now = Now();
+                foreach (var pr in result.Profiles)
+                {
+                    var profile = (cfg.Profiles ?? new MultiviewProfile[0]).FirstOrDefault(p => p != null && p.Id == pr.ProfileId);
+                    if (profile == null) continue;
+                    if (pr.Success && !string.IsNullOrEmpty(pr.LayoutId)) profile.LayoutId = pr.LayoutId;
+                    profile.LastSyncUtc = now;
+                    profile.LastSyncStatus = pr.Success ? pr.Message : "Failed: " + pr.Message;
+                }
+                if (processedDeletes.Count > 0)
+                {
+                    cfg.LayoutsToDelete = (cfg.LayoutsToDelete ?? new string[0])
+                        .Where(id => !processedDeletes.Contains(id, StringComparer.OrdinalIgnoreCase))
+                        .ToArray();
+                }
+                cfg.LastSyncUtc = now;
+                cfg.LastSyncStatus = failure ?? result.Message ?? "";
                 plugin.SaveConfiguration();
             }
             catch (Exception ex)

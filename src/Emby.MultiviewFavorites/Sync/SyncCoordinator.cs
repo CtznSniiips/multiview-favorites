@@ -59,7 +59,7 @@ namespace Emby.MultiviewFavorites.Sync
 
             try
             {
-                await engine.RunAsync(reason, dryRun: false, CancellationToken.None).ConfigureAwait(false);
+                await engine.RunAsync(reason, CancellationToken.None).ConfigureAwait(false);
             }
             catch
             {

@@ -111,15 +111,120 @@ Console.WriteLine("Tile order");
         "rows carry id, favorited time and eligibility (over-limit rows stay eligible)");
 }
 
+// ------------------------------------------------------------------ config migration / normalization
+Console.WriteLine("Config");
+{
+    var legacy = new Emby.MultiviewFavorites.Configuration.PluginConfiguration
+    {
+        EmbyUserId = "user-a", MultiviewName = "Steve Favorites", MaxStreams = 3, TileOrder = "manual",
+        ManualOrder = new[] { "x", "y" }, LayoutStyle = "", AudioSource = "all", LayoutId = "aaaa1111",
+        LastSyncStatus = "ok",
+    };
+    Check(Emby.MultiviewFavorites.Configuration.ConfigNormalizer.MigrateLegacy(legacy), "1.x settings are detected");
+    var mp = legacy.Profiles.Single();
+    Check(mp.EmbyUserId == "user-a" && mp.MultiviewName == "Steve Favorites" && mp.MaxStreams == 3 && mp.TileOrder == "manual"
+          && mp.ManualOrder.SequenceEqual(new[] { "x", "y" }) && mp.LayoutStyle == "" && mp.AudioSource == "all" && mp.LayoutId == "aaaa1111",
+        "migrated into one profile, keeping its layout id and every setting (including \"don't change\" style)");
+    Check(legacy.EmbyUserId == "" && legacy.LayoutId == "" && !Emby.MultiviewFavorites.Configuration.ConfigNormalizer.MigrateLegacy(legacy),
+        "legacy fields cleared; migration runs once");
+    Check(!Emby.MultiviewFavorites.Configuration.ConfigNormalizer.MigrateLegacy(new Emby.MultiviewFavorites.Configuration.PluginConfiguration()),
+        "fresh install: nothing to migrate");
+
+    var current = new Emby.MultiviewFavorites.Configuration.PluginConfiguration
+    {
+        Profiles = new[]
+        {
+            new Emby.MultiviewFavorites.Configuration.MultiviewProfile { Id = "p1", MultiviewName = "A", LayoutId = "lay00001", LastSyncStatus = "synced" },
+            new Emby.MultiviewFavorites.Configuration.MultiviewProfile { Id = "p2", MultiviewName = "B", LayoutId = "lay00002" },
+            new Emby.MultiviewFavorites.Configuration.MultiviewProfile { Id = "p3", MultiviewName = "C", LayoutId = "" },
+        },
+    };
+    var posted = new Emby.MultiviewFavorites.Configuration.PluginConfiguration
+    {
+        Profiles = new[]
+        {
+            // page posted p1 back with stale/empty state and silly values
+            new Emby.MultiviewFavorites.Configuration.MultiviewProfile { Id = "p1", MultiviewName = "  A  ", LayoutId = "", LastSyncStatus = "", MaxStreams = 50, TileOrder = "weird" },
+            new Emby.MultiviewFavorites.Configuration.MultiviewProfile { Id = "", MultiviewName = "", MaxStreams = 0 },
+        },
+    };
+    Emby.MultiviewFavorites.Configuration.ConfigNormalizer.NormalizeIncoming(posted, current);
+    var q1 = posted.Profiles[0];
+    Check(q1.LayoutId == "lay00001" && q1.LastSyncStatus == "synced" && q1.MultiviewName == "A" && q1.MaxStreams == 9 && q1.TileOrder == "channel",
+        "keeps plugin-owned state, trims names, clamps values");
+    Check(!string.IsNullOrEmpty(posted.Profiles[1].Id) && posted.Profiles[1].MultiviewName == "Emby Favorites" && posted.Profiles[1].MaxStreams == 4,
+        "new profile gets an id and defaults");
+    Check(posted.LayoutsToDelete.SequenceEqual(new[] { "lay00002" }), "removed profile with a layout -> queued for deletion (one without a layout isn't)");
+
+    var dupNames = Emby.MultiviewFavorites.Configuration.ConfigNormalizer.DuplicateNames(new[]
+    {
+        new Emby.MultiviewFavorites.Configuration.MultiviewProfile { MultiviewName = "Kids" },
+        new Emby.MultiviewFavorites.Configuration.MultiviewProfile { MultiviewName = "kids " },
+        new Emby.MultiviewFavorites.Configuration.MultiviewProfile { MultiviewName = "Steve" },
+    });
+    Check(dupNames.Count == 1 && dupNames.Contains("Kids"), "duplicate names detected case-insensitively");
+}
+
+// ------------------------------------------------------------------ multi-profile planning
+Console.WriteLine("Multi-profile planner");
+{
+    var dch = new List<DispatcharrChannel>
+    {
+        new() { Id = "12", Name = "CBS", Number = 2 }, new() { Id = "13", Name = "NBC", Number = 4 },
+        new() { Id = "14", Name = "FOX", Number = 5 }, new() { Id = "15", Name = "ESPN", Number = 206 },
+        new() { Id = "16", Name = "Steve's Favorites", Number = 9001 },
+    };
+    var settings = new Dictionary<string, object>
+    {
+        ["multiview_order"] = new List<object> { "old00001" },
+        ["multiview_old00001_name"] = "Sports Wall",
+        ["multiview_old00001_channel_1"] = "15",
+    };
+    var ids = new Queue<string>(new[] { "new00001", "new00002" });
+    var multi = SyncPlanner.BuildAll(new[]
+    {
+        new ProfilePlanInput { ProfileId = "steve", Favorites = new List<FavoriteChannel> { F("CBS", "2"), F("NBC", "4"), F("Kids' Favorites", "9002") },
+            Options = new SyncOptions { MultiviewName = "Steve's Favorites", OtherMultiviewNames = new[] { "Kids' Favorites" } } },
+        new ProfilePlanInput { ProfileId = "kids", Favorites = new List<FavoriteChannel> { F("FOX", "5"), F("ESPN", "206"), F("Steve's Favorites", "9001") },
+            Options = new SyncOptions { MultiviewName = "Kids' Favorites", OtherMultiviewNames = new[] { "Steve's Favorites" } } },
+    }, dch, settings, null, () => ids.Dequeue());
+    var order = MiniJson.AsArray(multi.Updates["multiview_order"]).Select(x => (string)x).ToList();
+    Check(string.Join(",", order) == "old00001,new00001,new00002", "two new layouts in one sync both land in multiview_order");
+    Check((string)multi.Updates["multiview_new00001_channel_1"] == "12" && (string)multi.Updates["multiview_new00002_channel_1"] == "14", "each layout gets its own user's tiles");
+    Check(multi.Plans[1].Value.Rows.First(r => r.EmbyName == "Steve's Favorites").Status.Contains("multiview"), "another profile's multiview channel is never tiled");
+    Check(multi.NeedsM3uRefresh, "new layouts -> M3U refresh");
+
+    var del = SyncPlanner.BuildAll(new ProfilePlanInput[0], dch, settings, new[] { "old00001", "missing1" });
+    Check(del.DeletedLayoutIds.SequenceEqual(new[] { "old00001" }) && del.AlreadyGoneLayoutIds.SequenceEqual(new[] { "missing1" }),
+        "deletes queued layouts; already-gone ones are just dropped");
+    Check(del.Updates.ContainsKey("multiview_old00001_name") && del.Updates["multiview_old00001_name"] == null
+          && MiniJson.AsArray(del.Updates["multiview_order"]).Count == 0, "deletion nulls the layout's keys and removes it from the order");
+}
+
 // ------------------------------------------------------------------ end to end against real api.py
 var srcDir = Environment.GetEnvironmentVariable("MV_SRC")!;
-var state = Path.Combine(Path.GetTempPath(), "mv_state.json");
-var port = 19292;
+var state = Path.Combine(Path.GetTempPath(), $"mv_state_{Guid.NewGuid():N}.json");
+// Free port, so a leftover mock (or anything else) on a fixed port can't hijack the run.
+int port;
+{
+    var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+    probe.Start();
+    port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+    probe.Stop();
+}
+var mockErr = new System.Text.StringBuilder();
 var py = Process.Start(new ProcessStartInfo("python3", $"../mock_dispatcharr.py {srcDir} {port} {state}") { RedirectStandardOutput = true, RedirectStandardError = true })!;
+// Drain stderr continuously so a chatty mock can never block on a full pipe.
+py.ErrorDataReceived += (_, e) => { if (e.Data != null) lock (mockErr) mockErr.AppendLine(e.Data); };
+py.BeginErrorReadLine();
 try
 {
     var line = await py.StandardOutput.ReadLineAsync();
-    if (line != "ready") throw new Exception("mock failed: " + await py.StandardError.ReadToEndAsync());
+    if (line != "ready")
+    {
+        py.WaitForExit(2000);
+        throw new Exception("mock Dispatcharr failed to start:\n" + mockErr);
+    }
     var baseUrl = $"http://127.0.0.1:{port}";
     var http = new HttpClient();
     async Task<Dictionary<string, object>> Resolve(string id) => MiniJson.AsObject(MiniJson.Parse(await http.GetStringAsync($"{baseUrl}/__resolve?id={id}")));
@@ -188,6 +293,39 @@ try
     var p7 = await RunSync(baseUrl, new List<FavoriteChannel> { F("CBS", "2") }, opts);
     var r7 = await Resolve(p1.LayoutId);
     Check(!(bool)r7["playable"] && p7.Warnings.Any(w => w.Contains("at least 2")), "warns that 1 channel isn't playable");
+
+    Console.WriteLine("E2E: multiple multiviews");
+    {
+        var client = new DispatcharrClient(baseUrl, "/dash", "admin", "secret");
+        async Task<MultiPlan> SyncAll(IEnumerable<ProfilePlanInput> ps, IEnumerable<string> deletes = null)
+        {
+            var mp = SyncPlanner.BuildAll(ps, await client.GetChannelsAsync(CancellationToken.None), await client.GetSettingsAsync(CancellationToken.None), deletes);
+            if (mp.HasChanges) await client.PatchSettingsAsync(mp.Updates, CancellationToken.None);
+            return mp;
+        }
+        var kidsFavs = new List<FavoriteChannel> { F("PBS Kids", "5.1"), F("ABC", "7"), F("FOX", "5") };
+        var annaFavs = new List<FavoriteChannel> { F("ESPN", "206"), F("CBS", "2") };
+        ProfilePlanInput P(string id, string name, List<FavoriteChannel> fv) => new ProfilePlanInput { ProfileId = id, Favorites = fv,
+            Options = new SyncOptions { MultiviewName = name, OtherMultiviewNames = new[] { "Kids", "Anna", "My Favorites" }.Where(n => n != name).ToList() } };
+
+        var mm = await SyncAll(new[] { P("kids", "Kids", kidsFavs), P("anna", "Anna", annaFavs) });
+        var kidsId = mm.Plans[0].Value.LayoutId; var annaId = mm.Plans[1].Value.LayoutId;
+        var rk = await Resolve(kidsId);
+        Check(mm.Plans.All(p => p.Value.IsNewLayout) && Tiles(rk) == "FOX,PBS Kids,ABC" && Tiles(await Resolve(annaId)) == "CBS,ESPN",
+            "two users' multiviews created in one patch, each with its own tiles");
+        Check(MiniJson.AsArray(rk["order"]).Count == 4 && MiniJson.ToCanonical(rk["count"]) == "4",
+            "Multiview sees all 4 layouts (Sports Wall, the earlier one, Kids, Anna); count in sync");
+        var again = await SyncAll(new[] { P("kids", "Kids", kidsFavs), P("anna", "Anna", annaFavs) });
+        Check(!again.HasChanges, "re-sync of both is a no-op");
+
+        var gone = await SyncAll(new[] { P("kids", "Kids", kidsFavs) }, new[] { annaId });
+        var st2 = MiniJson.AsObject(MiniJson.Parse(File.ReadAllText(state)));
+        var order2 = MiniJson.AsArray(st2["multiview_order"]).Select(x => (string)x).ToList();
+        Check(gone.DeletedLayoutIds.SequenceEqual(new[] { annaId }) && !order2.Contains(annaId) && order2.Contains(kidsId) && order2.Count == 3
+              && !st2.Keys.Any(k => k.StartsWith($"multiview_{annaId}_")) && MiniJson.ToCanonical(st2["multiview_count"]) == "3",
+            "removed profile's layout deleted (keys gone, order + count updated); others untouched");
+        Check(Tiles(await Resolve(kidsId)) == "FOX,PBS Kids,ABC", "remaining multiview still resolves");
+    }
 
     Console.WriteLine("E2E: errors");
     var msg = "";

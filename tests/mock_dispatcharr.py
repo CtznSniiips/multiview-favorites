@@ -208,5 +208,17 @@ class Quiet(WSGIRequestHandler):
         pass
 
 
+try:
+    # Same server the real Multiview plugin uses (server.py: gevent pywsgi).
+    # MOCK_WSGIREF=1 forces the stdlib fallback (useful for exercising the client's retry).
+    if os.environ.get("MOCK_WSGIREF"):
+        raise ImportError
+    from gevent import pywsgi
+    server = pywsgi.WSGIServer(("127.0.0.1", PORT), app, log=None)
+    server.init_socket()
+except ImportError:
+    # Fallback: stdlib single-threaded server. Works, but it can reset a connection
+    # mid-request now and then, which the plugin's retry has to absorb.
+    server = make_server("127.0.0.1", PORT, app, handler_class=Quiet)
 print("ready", flush=True)
-make_server("127.0.0.1", PORT, app, handler_class=Quiet).serve_forever()
+server.serve_forever()

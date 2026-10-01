@@ -23,10 +23,23 @@ namespace Emby.MultiviewFavorites
             Instance = this;
         }
 
+        /// <summary>
+        /// Moves 1.x single-channel settings into the profile list (once). Called from the entry
+        /// point: the plugin's configuration path isn't set up yet while the constructor runs.
+        /// Returns the migrated multiview's name, or null if there was nothing to migrate.
+        /// </summary>
+        public string EnsureMigrated()
+        {
+            var cfg = Configuration;
+            if (!ConfigNormalizer.MigrateLegacy(cfg)) return null;
+            SaveConfiguration();
+            return cfg.Profiles.Length > 0 ? cfg.Profiles[0].MultiviewName : "";
+        }
+
         public override string Name => "Multiview Favorites";
 
         public override string Description =>
-            "Syncs a user's favorited Live TV channels into a Dispatcharr Multiview layout.";
+            "Turns Emby users' favorite Live TV channels into Dispatcharr Multiview channels.";
 
         public override Guid Id => PluginId;
 
@@ -57,23 +70,13 @@ namespace Emby.MultiviewFavorites
         }
 
         /// <summary>
-        /// Called when the dashboard config page saves. Keeps plugin-owned state the
-        /// page may have posted back stale, then kicks off a sync.
+        /// Called when the dashboard config page saves. Cleans up the posted profiles, keeps
+        /// plugin-owned state the page may have posted back stale, queues the layouts of removed
+        /// profiles for deletion, then kicks off a sync.
         /// </summary>
         public override void UpdateConfiguration(BasePluginConfiguration configuration)
         {
-            var incoming = configuration as PluginConfiguration;
-            var current = Configuration;
-            if (incoming != null && current != null)
-            {
-                if (string.IsNullOrEmpty(incoming.LayoutId)) incoming.LayoutId = current.LayoutId;
-                incoming.LastSyncUtc = current.LastSyncUtc;
-                incoming.LastSyncStatus = current.LastSyncStatus;
-                if (incoming.MaxStreams < 2) incoming.MaxStreams = 2;
-                if (incoming.MaxStreams > 9) incoming.MaxStreams = 9;
-                if (incoming.ManualOrder == null) incoming.ManualOrder = new string[0];
-                incoming.TileOrder = Sync.TileOrders.Normalize(incoming.TileOrder);
-            }
+            ConfigNormalizer.NormalizeIncoming(configuration as PluginConfiguration, Configuration);
 
             base.UpdateConfiguration(configuration);
             SyncCoordinator.RequestSync("configuration saved", TimeSpan.FromSeconds(1));
